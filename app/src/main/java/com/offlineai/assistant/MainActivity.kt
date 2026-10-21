@@ -15,6 +15,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // If the app crashed last time, show the report first (plain views).
+        val report = CrashReport.pending(this)
+        if (report != null) {
+            CrashReport.show(this, report) { recreate() }
+            return
+        }
+
         setContent {
             AppTheme {
                 ChatScreen(vm)
