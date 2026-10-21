@@ -1,31 +1,32 @@
 package com.offlineai.assistant
 
-import android.app.Activity
-import android.graphics.Typeface
 import android.os.Bundle
-import android.widget.ScrollView
-import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
 
-// Milestone 1 uses plain views to keep the first build simple.
-// The real UI (Jetpack Compose) comes in milestone 2.
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
+    private val vm: ChatViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        val pad = (16 * resources.displayMetrics.density).toInt()
-        val text = TextView(this).apply {
-            setPadding(pad, pad * 2, pad, pad)
-            textSize = 14f
-            typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
+        setContent {
+            AppTheme {
+                ChatScreen(vm)
+            }
         }
-
-        text.text = try {
-            "Offline AI - milestone 1\n\nllama.cpp loaded OK.\n\n" + NativeBridge.systemInfo()
-        } catch (t: Throwable) {
-            "Failed to load the native library:\n$t"
-        }
-
-        setContentView(ScrollView(this).apply { addView(text) })
     }
+}
+
+@Composable
+fun AppTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme(),
+        content = content
+    )
 }
