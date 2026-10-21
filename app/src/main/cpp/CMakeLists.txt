@@ -8,11 +8,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # optimization, which makes model inference painfully slow.
 set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 
-# Baseline that most ARM64 phones from ~2019 onward support (dot product).
-if(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -march=armv8.2-a+dotprod")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8.2-a+dotprod")
-endif()
+# Plain ARMv8-A baseline: runs on every 64-bit ARM phone.
+# (A newer baseline with dot-product instructions crashed with "illegal
+# instruction" on phones whose CPU does not have them.)
+set(GGML_CPU_ARM_ARCH "armv8-a" CACHE STRING "" FORCE)
 
 set(LLAMA_DIR ${CMAKE_CURRENT_LIST_DIR}/llama.cpp)
 if(NOT EXISTS ${LLAMA_DIR}/CMakeLists.txt)

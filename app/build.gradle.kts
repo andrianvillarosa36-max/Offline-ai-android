@@ -14,8 +14,8 @@ android {
         applicationId = "com.offlineai.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
 
         // Phones only. Skipping x86 keeps the build fast and the APK small.
         ndk {

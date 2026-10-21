@@ -155,6 +155,13 @@ private fun ModelPanel(
     onClose: () -> Unit
 ) {
     val busy = vm.status == ModelStatus.BUSY || vm.status == ModelStatus.LOADING
+    val cpuInfo = remember {
+        try {
+            NativeBridge.systemInfo().trim()
+        } catch (t: Throwable) {
+            "native library not loaded"
+        }
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -194,6 +201,8 @@ private fun ModelPanel(
                 enabled = !busy && !vm.generating,
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Import a .gguf file") }
+            Spacer(Modifier.height(8.dp))
+            Text("CPU: $cpuInfo", style = MaterialTheme.typography.labelSmall)
             if (ready) {
                 TextButton(onClick = onClose) { Text("Close") }
             }
