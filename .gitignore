@@ -1,0 +1,16 @@
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+captures/
+.cxx/
+
+# llama.cpp is fetched by scripts/fetch_llama.sh, not committed
+app/src/main/cpp/llama.cpp/
+
+# never commit models or built apps
+*.gguf
+*.apk
+*.aab
