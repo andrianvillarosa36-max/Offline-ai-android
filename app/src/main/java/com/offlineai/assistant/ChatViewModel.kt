@@ -23,6 +23,15 @@ data class ChatMessage(val role: String, val text: String, val stats: String = "
 
 enum class ModelStatus { NONE, BUSY, LOADING, READY }
 
+/** A document the user attached, split into searchable chunks. */
+class Doc(
+    val name: String,
+    val pages: Int,
+    val words: Int,
+    val chunks: List<String>,
+    val index: Bm25Index
+)
+
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     val messages = mutableStateListOf<ChatMessage>()
@@ -37,6 +46,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var generating by mutableStateOf(false)
         private set
     var modelName by mutableStateOf("")
+        private set
+
+    var document by mutableStateOf<Doc?>(null)
+        private set
+    /** Non-empty while a document is being read. */
+    var docStatus by mutableStateOf("")
+        private set
+    var docError by mutableStateOf("")
         private set
 
     private val modelsDir = File(app.filesDir, "models").apply { mkdirs() }
@@ -215,6 +232,62 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---------------------------------------------------------------- documents
+
+    fun attachDocument(uri: Uri) {
+        if (generating || docStatus.isNotEmpty()) return
+        docError = ""
+        docStatus = "Opening document..."
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val extracted = DocReader.read(getApplication<Application>(), uri) { docStatus = it }
+                if (extracted.text.isBlank()) {
+                    throw IllegalStateException(
+                        "No selectable text found. Scanned PDFs need OCR, which comes in a later update."
+                    )
+                }
+                docStatus = "Indexing..."
+                val chunks = Retrieval.chunk(extracted.text)
+                val words = extracted.text.split(Regex("\\s+")).count { it.isNotEmpty() }
+                document = Doc(extracted.name, extracted.pages, words, chunks, Bm25Index(chunks))
+            } catch (t: Throwable) {
+                docError = if (t is OutOfMemoryError) {
+                    "Not enough memory to read this file."
+                } else {
+                    t.message ?: "Could not read that file."
+                }
+            } finally {
+                docStatus = ""
+            }
+        }
+    }
+
+    fun removeDocument() {
+        if (!generating) document = null
+    }
+
+    fun clearDocError() {
+        docError = ""
+    }
+
+    /** Wraps the question with the most relevant excerpts of the attached document. */
+    private fun docPrompt(doc: Doc, question: String): String {
+        var picks = doc.index.search(question, TOP_CHUNKS)
+        if (picks.isEmpty()) {
+            // Nothing matched (for example "what is this about?"): use the start of the document.
+            picks = (0 until minOf(TOP_CHUNKS, doc.chunks.size)).toList()
+        }
+        val sb = StringBuilder()
+        sb.append("Use the document excerpts below to answer the question. ")
+            .append("If the answer is not in the excerpts, say you could not find it in the document.\n\n")
+        picks.forEachIndexed { n, i ->
+            sb.append("[Excerpt ").append(n + 1).append("]\n").append(doc.chunks[i]).append("\n\n")
+        }
+        sb.append("Question: ").append(question)
+        return sb.toString()
+    }
+
     // ---------------------------------------------------------------- chat
 
     fun newChat() {
@@ -229,26 +302,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val userText = text.trim()
         if (userText.isEmpty() || generating || status != ModelStatus.READY) return
 
+        val doc = document
         messages.add(ChatMessage("user", userText))
-        messages.add(ChatMessage("assistant", ""))
+        messages.add(ChatMessage("assistant", if (doc != null) "Reading the document..." else ""))
         generating = true
         val history = messages.toList().dropLast(1)
 
         viewModelScope.launch(Dispatchers.Default) {
             val reply = StringBuilder()
-            var pieces = 0
-            val started = System.nanoTime()
 
             val listener = object : TokenListener {
                 override fun onToken(bytes: ByteArray) {
                     reply.append(String(bytes, Charsets.UTF_8))
-                    pieces++
                     messages[messages.lastIndex] = ChatMessage("assistant", reply.toString())
                 }
             }
 
             val error = try {
-                val prompt = buildPrompt(history)
+                val lastText = if (doc != null) docPrompt(doc, userText) else userText
+                val prompt = buildPrompt(history, lastText)
                 NativeBridge.generate(
                     prompt.toByteArray(Charsets.UTF_8),
                     MAX_NEW_TOKENS,
@@ -259,10 +331,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 "Native error: ${t.message}"
             }
 
-            val seconds = (System.nanoTime() - started) / 1_000_000_000.0
-            val stats = if (pieces > 0 && seconds > 0.0) {
-                String.format(Locale.US, "~%.1f tokens/sec", pieces / seconds)
-            } else ""
+            val stats = formatStats(
+                try {
+                    NativeBridge.lastStats()
+                } catch (t: Throwable) {
+                    ""
+                }
+            )
             var finalText = reply.toString()
             if (error.isNotEmpty()) finalText += "\n\n[Error] $error"
             if (finalText.isBlank()) finalText = "(no reply)"
@@ -271,23 +346,42 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Turns "412;21300;38;15800" into "read 412 tokens in 21.3s | wrote 38 tokens at 2.4 tok/s". */
+    private fun formatStats(raw: String): String {
+        val p = raw.split(";")
+        if (p.size != 4) return ""
+        val nPrompt = p[0].toIntOrNull() ?: return ""
+        val promptMs = p[1].toDoubleOrNull() ?: return ""
+        val nGen = p[2].toIntOrNull() ?: return ""
+        val genMs = p[3].toDoubleOrNull() ?: return ""
+
+        val sb = StringBuilder()
+        sb.append(String.format(Locale.US, "read %d tokens in %.1fs", nPrompt, promptMs / 1000.0))
+        if (nGen > 0 && genMs > 0.0) {
+            sb.append(String.format(Locale.US, " | wrote %d tokens at %.1f tok/s", nGen, nGen / (genMs / 1000.0)))
+        }
+        return sb.toString()
+    }
+
     /** ChatML format (used by Qwen and many other models). Other formats come later. */
-    private fun format(msgs: List<ChatMessage>): String {
+    private fun format(msgs: List<ChatMessage>, lastText: String): String {
         val sb = StringBuilder()
         sb.append("<|im_start|>system\n").append(SYSTEM_PROMPT).append("<|im_end|>\n")
-        for (m in msgs) {
+        for ((i, m) in msgs.withIndex()) {
+            // Only the newest question carries the document excerpts.
+            val t = if (i == msgs.lastIndex) lastText else m.text
             sb.append("<|im_start|>").append(m.role).append("\n")
-                .append(m.text).append("<|im_end|>\n")
+                .append(t).append("<|im_end|>\n")
         }
         sb.append("<|im_start|>assistant\n")
         return sb.toString()
     }
 
     /** Drops the oldest turns until the conversation fits the context window. */
-    private fun buildPrompt(history: List<ChatMessage>): String {
+    private fun buildPrompt(history: List<ChatMessage>, lastText: String): String {
         var start = 0
         while (true) {
-            val prompt = format(history.subList(start, history.size))
+            val prompt = format(history.subList(start, history.size), lastText)
             val tokens = NativeBridge.tokenCount(prompt.toByteArray(Charsets.UTF_8))
             if (tokens <= nCtx - RESERVE_TOKENS || start >= history.size - 1) return prompt
             start += 2
@@ -300,6 +394,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 "Answer clearly and concisely."
         private const val MAX_NEW_TOKENS = 1024
         private const val RESERVE_TOKENS = 512
+        private const val TOP_CHUNKS = 3
         private const val TEMPERATURE = 0.7f
         private const val DEFAULT_MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
         private val DEFAULT_MODEL_URLS = listOf(

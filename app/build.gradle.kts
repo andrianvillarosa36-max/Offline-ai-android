@@ -14,8 +14,8 @@ android {
         applicationId = "com.offlineai.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.2.2"
+        versionCode = 5
+        versionName = "0.3.0"
 
         // Phones only. Skipping x86 keeps the build fast and the APK small.
         ndk {
@@ -85,4 +85,5 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 }

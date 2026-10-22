@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <memory>
 #include <string>
@@ -22,6 +23,32 @@ int g_n_ctx = 2048;
 int g_n_threads = 4;
 bool g_backend_ready = false;
 std::atomic<bool> g_stop{false};
+
+// Timing of the most recent reply, read by Kotlin through lastStats().
+struct Stats {
+    int n_prompt = 0;
+    int n_gen = 0;
+    double prompt_ms = 0.0;
+    double gen_ms = 0.0;
+};
+Stats g_stats;
+
+using Clock = std::chrono::steady_clock;
+
+double ms_since(Clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
+}
+
+// Records the stats on every exit path of run_generate.
+struct StatsGuard {
+    Stats st;
+    Clock::time_point gen_start;
+    bool gen_started = false;
+    ~StatsGuard() {
+        if (gen_started) st.gen_ms = ms_since(gen_start);
+        g_stats = st;
+    }
+};
 
 struct CtxDeleter {
     void operator()(llama_context *c) const { if (c) llama_free(c); }
@@ -104,11 +131,13 @@ std::string run_generate(JNIEnv *env, jbyteArray jprompt, jint max_new, jfloat t
                          jobject listener) {
     if (g_model == nullptr) return "No model is loaded.";
     g_stop = false;
+    StatsGuard sg;
 
     const llama_vocab *vocab = llama_model_get_vocab(g_model);
     const std::string prompt = bytes_to_string(env, jprompt);
     std::vector<llama_token> toks = tokenize(vocab, prompt);
     const int n_prompt = static_cast<int>(toks.size());
+    sg.st.n_prompt = n_prompt;
     if (n_prompt == 0) return "Empty prompt.";
     if (n_prompt >= g_n_ctx - 8) return "This message is too long for the context window.";
     const int n_max = std::min(static_cast<int>(max_new), g_n_ctx - n_prompt - 1);
@@ -139,6 +168,7 @@ std::string run_generate(JNIEnv *env, jbyteArray jprompt, jint max_new, jfloat t
 
     // Read the prompt in chunks no bigger than the batch size.
     const int chunk = static_cast<int>(cp.n_batch);
+    const Clock::time_point t_prefill = Clock::now();
     for (int i = 0; i < n_prompt; i += chunk) {
         if (g_stop) return std::string();
         const int n = std::min(chunk, n_prompt - i);
@@ -146,6 +176,9 @@ std::string run_generate(JNIEnv *env, jbyteArray jprompt, jint max_new, jfloat t
             return "Failed while reading the prompt.";
         }
     }
+    sg.st.prompt_ms = ms_since(t_prefill);
+    sg.gen_start = Clock::now();
+    sg.gen_started = true;
 
     jclass cls = env->GetObjectClass(listener);
     jmethodID mid = env->GetMethodID(cls, "onToken", "([B)V");
@@ -158,6 +191,7 @@ std::string run_generate(JNIEnv *env, jbyteArray jprompt, jint max_new, jfloat t
     for (int i = 0; i < n_max && !g_stop; i++) {
         llama_token tok = llama_sampler_sample(raw, ctx.get(), -1);
         if (llama_vocab_is_eog(vocab, tok)) break;
+        sg.st.n_gen++;
 
         char buf[256];
         const int len = llama_token_to_piece(vocab, tok, buf, static_cast<int32_t>(sizeof(buf)),
@@ -258,6 +292,15 @@ Java_com_offlineai_assistant_NativeBridge_generate(JNIEnv *env, jobject /* this 
         err = "Unknown native error.";
     }
     return to_jstring(env, err);
+}
+
+// "promptTokens;promptMs;generatedTokens;generateMs" for the last reply.
+JNIEXPORT jstring JNICALL
+Java_com_offlineai_assistant_NativeBridge_lastStats(JNIEnv *env, jobject /* this */) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%d;%.0f;%d;%.0f",
+                  g_stats.n_prompt, g_stats.prompt_ms, g_stats.n_gen, g_stats.gen_ms);
+    return env->NewStringUTF(buf);
 }
 
 JNIEXPORT void JNICALL

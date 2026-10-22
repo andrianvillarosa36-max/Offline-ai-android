@@ -27,5 +27,8 @@ object NativeBridge {
         listener: TokenListener
     ): String
 
+    /** "promptTokens;promptMs;generatedTokens;generateMs" for the last reply. */
+    external fun lastStats(): String
+
     external fun stop()
 }

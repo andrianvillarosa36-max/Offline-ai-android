@@ -50,6 +50,9 @@ fun ChatScreen(vm: ChatViewModel) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) vm.importModel(uri)
     }
+    val docPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) vm.attachDocument(uri)
+    }
 
     // Keep the newest text in view while a reply streams in.
     val lastLength = vm.messages.lastOrNull()?.text?.length ?: 0
@@ -97,8 +100,8 @@ fun ChatScreen(vm: ChatViewModel) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (vm.messages.isEmpty() && ready) {
                     Text(
-                        "Ask anything, or paste some text and ask me to summarize it, " +
-                            "fix its grammar, or list its keywords.",
+                        "Ask anything, or tap Attach to add a PDF or text file " +
+                            "and ask questions about it.",
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -115,6 +118,8 @@ fun ChatScreen(vm: ChatViewModel) {
                 }
             }
 
+            DocBar(vm)
+
             // Input row
             Row(
                 modifier = Modifier
@@ -122,11 +127,21 @@ fun ChatScreen(vm: ChatViewModel) {
                     .padding(8.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
+                TextButton(
+                    onClick = { docPicker.launch(arrayOf("application/pdf", "text/*")) },
+                    enabled = !vm.generating && vm.docStatus.isEmpty()
+                ) { Text("Attach") }
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text(if (ready) "Message" else "Set up a model first") },
+                    placeholder = {
+                        Text(
+                            if (!ready) "Set up a model first"
+                            else if (vm.document != null) "Ask about the document"
+                            else "Message"
+                        )
+                    },
                     enabled = ready,
                     maxLines = 5
                 )
@@ -230,6 +245,52 @@ private fun MessageBubble(m: ChatMessage) {
                 if (m.stats.isNotEmpty()) {
                     Spacer(Modifier.height(4.dp))
                     Text(m.stats, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DocBar(vm: ChatViewModel) {
+    val doc = vm.document
+    if (doc != null || vm.docStatus.isNotEmpty() || vm.docError.isNotEmpty()) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+        ) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                if (vm.docStatus.isNotEmpty()) {
+                    Text(vm.docStatus, style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(6.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else if (doc != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(doc.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                            val size = if (doc.pages > 0) "${doc.pages} pages" else "text file"
+                            Text(
+                                "$size, ${doc.words} words",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                        TextButton(
+                            onClick = { vm.removeDocument() },
+                            enabled = !vm.generating
+                        ) { Text("Remove") }
+                    }
+                }
+                if (vm.docError.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            vm.docError,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { vm.clearDocError() }) { Text("OK") }
+                    }
                 }
             }
         }
