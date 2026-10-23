@@ -9,7 +9,8 @@ Everything runs on the phone using llama.cpp. No cloud, no account.
 - Milestone 1: llama.cpp compiles and loads on Android. Done.
 - Milestone 2: model download/import, streaming chat, app icon. Done.
 - Milestone 3: attach a PDF/TXT/MD file and ask questions about it (offline BM25 search), accurate speed stats. Done.
-- Next: summarize / keywords / grammar buttons, image OCR.
+- Milestone 4: Summarize (long text or attached document, section by section), instant Keywords, Fix grammar. Done.
+- Next: image OCR, speed work.
 
 ## Build (no PC needed)
 

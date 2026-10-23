@@ -4,14 +4,20 @@ import kotlin.math.ln
 
 /** Text helpers shared by document search (and, later, keyword extraction). */
 object Retrieval {
-    private val STOP_WORDS = setOf(
+    internal val STOP_WORDS = setOf(
         "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at", "by", "for",
         "with", "about", "as", "into", "from", "is", "are", "was", "were", "be", "been", "being",
         "it", "its", "this", "that", "these", "those", "i", "you", "he", "she", "we", "they",
         "them", "his", "her", "our", "their", "my", "your", "do", "does", "did", "what", "which",
         "who", "whom", "how", "why", "when", "where", "can", "could", "should", "would", "will",
         "shall", "may", "might", "not", "no", "so", "than", "then", "there", "here", "also",
-        "have", "has", "had", "me", "us", "tell", "say", "says", "said"
+        "have", "has", "had", "me", "us", "tell", "say", "says", "said",
+        "after", "before", "every", "each", "among", "between", "during", "over", "under",
+        "until", "while", "because", "since", "through", "both", "some", "any", "all", "more",
+        "most", "other", "such", "only", "own", "same", "very", "just", "too", "out", "off",
+        "again", "once", "per", "via", "within", "without", "above", "below", "against", "upon",
+        "whether", "either", "neither", "another", "many", "much", "few", "several", "near",
+        "like", "make", "made", "use", "used", "need", "needs", "must", "get", "gets", "one"
     )
 
     private val WORD = Regex("[\\p{L}\\p{N}]+")

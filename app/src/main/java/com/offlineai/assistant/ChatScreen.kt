@@ -4,6 +4,8 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -100,8 +102,8 @@ fun ChatScreen(vm: ChatViewModel) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (vm.messages.isEmpty() && ready) {
                     Text(
-                        "Ask anything, or tap Attach to add a PDF or text file " +
-                            "and ask questions about it.",
+                        "Ask anything, tap Attach to add a PDF or text file, " +
+                            "or type some text and use Summarize, Keywords or Fix grammar.",
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -119,6 +121,7 @@ fun ChatScreen(vm: ChatViewModel) {
             }
 
             DocBar(vm)
+            ActionRow(vm, input) { input = "" }
 
             // Input row
             Row(
@@ -294,5 +297,43 @@ private fun DocBar(vm: ChatViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ActionRow(vm: ChatViewModel, input: String, onUsed: () -> Unit) {
+    val hasText = input.isNotBlank()
+    val hasDoc = vm.document != null
+    val ready = vm.status == ModelStatus.READY
+    val idle = !vm.generating && vm.docStatus.isEmpty()
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        OutlinedButton(
+            onClick = {
+                vm.summarize(input)
+                onUsed()
+            },
+            enabled = ready && idle && (hasText || hasDoc)
+        ) { Text("Summarize") }
+        OutlinedButton(
+            onClick = {
+                vm.keywords(input)
+                onUsed()
+            },
+            enabled = idle && (hasText || hasDoc)
+        ) { Text("Keywords") }
+        OutlinedButton(
+            onClick = {
+                vm.fixGrammar(input)
+                onUsed()
+            },
+            enabled = ready && idle && hasText
+        ) { Text("Fix grammar") }
     }
 }

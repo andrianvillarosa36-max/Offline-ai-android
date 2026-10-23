@@ -18,6 +18,7 @@ import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
+import kotlin.math.roundToInt
 
 data class ChatMessage(val role: String, val text: String, val stats: String = "")
 
@@ -29,8 +30,12 @@ class Doc(
     val pages: Int,
     val words: Int,
     val chunks: List<String>,
-    val index: Bm25Index
-)
+    val index: Bm25Index,
+    val text: String
+) {
+    /** Filled in after the first full summary, so follow-up questions are cheap. */
+    var summary: String? = null
+}
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -250,7 +255,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 docStatus = "Indexing..."
                 val chunks = Retrieval.chunk(extracted.text)
                 val words = extracted.text.split(Regex("\\s+")).count { it.isNotEmpty() }
-                document = Doc(extracted.name, extracted.pages, words, chunks, Bm25Index(chunks))
+                document = Doc(extracted.name, extracted.pages, words, chunks, Bm25Index(chunks), extracted.text)
             } catch (t: Throwable) {
                 docError = if (t is OutOfMemoryError) {
                     "Not enough memory to read this file."
@@ -272,7 +277,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Wraps the question with the most relevant excerpts of the attached document. */
+    private fun isGeneral(question: String): Boolean {
+        val q = question.lowercase().replace('\u2019', '\'')
+        return GENERAL_HINTS.any { q.contains(it) }
+    }
+
     private fun docPrompt(doc: Doc, question: String): String {
+        if (isGeneral(question)) {
+            val cached = doc.summary
+            if (cached != null) {
+                return "Here is a summary of a document:\n\n" + cached +
+                    "\n\nUsing only this summary, answer the request: " + question
+            }
+            val n = minOf(2, doc.chunks.size)
+            val sb = StringBuilder("Here is the beginning of a document:\n\n")
+            for (i in 0 until n) {
+                sb.append("[Excerpt ").append(i + 1).append("]\n").append(doc.chunks[i]).append("\n\n")
+            }
+            sb.append("Using it, answer the request: ").append(question)
+            sb.append("\nMention that this is based only on the beginning of the document.")
+            return sb.toString()
+        }
         var picks = doc.index.search(question, TOP_CHUNKS)
         if (picks.isEmpty()) {
             // Nothing matched (for example "what is this about?"): use the start of the document.
@@ -295,6 +320,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopGeneration() {
+        cancelRequested = true
         NativeBridge.stop()
     }
 
@@ -342,6 +368,214 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (error.isNotEmpty()) finalText += "\n\n[Error] $error"
             if (finalText.isBlank()) finalText = "(no reply)"
             messages[messages.lastIndex] = ChatMessage("assistant", finalText, stats)
+            generating = false
+        }
+    }
+
+    // ---------------------------------------------------------------- actions
+
+    @Volatile
+    private var cancelRequested = false
+
+    private fun setAssistant(text: String) {
+        messages[messages.lastIndex] = ChatMessage("assistant", text)
+    }
+
+    private fun setFinal(text: String, stats: String) {
+        messages[messages.lastIndex] = ChatMessage("assistant", text, stats)
+    }
+
+    private fun formatDuration(seconds: Double): String {
+        val s = seconds.toInt()
+        return if (s < 60) "${s}s" else "${s / 60}m ${s % 60}s"
+    }
+
+    private fun preview(text: String): String =
+        if (text.length > 400) text.take(400) + "..." else text
+
+    /** One self-contained model call without chat history. Returns (text, error). */
+    private fun runOnce(
+        instruction: String,
+        body: String,
+        maxTokens: Int,
+        temperature: Float,
+        onText: ((String) -> Unit)?
+    ): Pair<String, String> {
+        val sb = StringBuilder()
+        val listener = object : TokenListener {
+            override fun onToken(bytes: ByteArray) {
+                sb.append(String(bytes, Charsets.UTF_8))
+                onText?.invoke(sb.toString())
+            }
+        }
+        val prompt = "<|im_start|>system\n" + SYSTEM_PROMPT + "<|im_end|>\n" +
+            "<|im_start|>user\n" + instruction + "\n\n" + body + "<|im_end|>\n" +
+            "<|im_start|>assistant\n"
+        val error = try {
+            NativeBridge.generate(prompt.toByteArray(Charsets.UTF_8), maxTokens, temperature, listener)
+        } catch (t: Throwable) {
+            "Native error: ${t.message}"
+        }
+        return Pair(sb.toString().trim(), error)
+    }
+
+    /** Evenly spaced picks (always including the first and last) when there are too many. */
+    private fun pickEvenly(items: List<String>, max: Int): List<String> {
+        if (items.size <= max) return items
+        val picks = (0 until max)
+            .map { (it * (items.size - 1).toDouble() / (max - 1)).roundToInt() }
+            .distinct()
+        return picks.map { items[it] }
+    }
+
+    /** Summarizes typed text, or the attached document when the box is empty. */
+    fun summarize(inputText: String) {
+        val typed = inputText.trim()
+        val doc = document
+        if (generating || status != ModelStatus.READY) return
+        if (typed.isEmpty() && doc == null) return
+
+        val sourceDoc = if (typed.isEmpty()) doc else null
+        val source = sourceDoc?.text ?: typed
+        val label = if (sourceDoc != null) "Summarize the attached document."
+        else "Summarize this text:\n" + preview(typed)
+
+        messages.add(ChatMessage("user", label))
+        val cached = sourceDoc?.summary
+        if (cached != null) {
+            messages.add(ChatMessage("assistant", cached, "saved from earlier"))
+            return
+        }
+        messages.add(ChatMessage("assistant", "Preparing..."))
+        generating = true
+        cancelRequested = false
+
+        viewModelScope.launch(Dispatchers.Default) {
+            val started = System.nanoTime()
+            var error = ""
+            var result = ""
+            var note = ""
+            try {
+                val all = Retrieval.chunk(source, SECTION_WORDS, 0)
+                val sections = pickEvenly(all, MAX_SECTIONS)
+                if (sections.size < all.size) {
+                    note = "\n\n(Long text: summarized ${sections.size} evenly spaced sections " +
+                        "out of ${all.size}.)"
+                }
+
+                if (sections.size <= 1) {
+                    setAssistant("Reading...")
+                    val (text, err) = runOnce(
+                        SUMMARY_ONE_INSTRUCTION, sections.firstOrNull() ?: source, 300, 0.3f
+                    ) { setAssistant(it) }
+                    result = text
+                    error = err
+                } else {
+                    val partials = ArrayList<String>()
+                    for ((n, section) in sections.withIndex()) {
+                        if (cancelRequested) break
+                        val elapsed = (System.nanoTime() - started) / 1e9
+                        val eta = if (n > 0) {
+                            val left = elapsed / n * (sections.size - n) + REDUCE_ESTIMATE_SECONDS
+                            " (about ${formatDuration(left)} left)"
+                        } else ""
+                        setAssistant("Summarizing part ${n + 1} of ${sections.size}$eta")
+                        val (text, err) = runOnce(SUMMARY_PART_INSTRUCTION, section, 100, 0.2f, null)
+                        if (err.isNotEmpty()) {
+                            error = err
+                            break
+                        }
+                        if (cancelRequested) break
+                        partials.add(text)
+                    }
+                    if (error.isEmpty() && !cancelRequested) {
+                        setAssistant("Combining the parts...")
+                        val body = partials.withIndex()
+                            .joinToString("\n") { "Part ${it.index + 1}: ${it.value}" }
+                        val (text, err) = runOnce(
+                            SUMMARY_FINAL_INSTRUCTION, body, 350, 0.3f
+                        ) { setAssistant(it) }
+                        result = text
+                        error = err
+                    }
+                }
+            } catch (t: Throwable) {
+                error = "Error: ${t.message}"
+            }
+
+            val took = formatDuration((System.nanoTime() - started) / 1e9)
+            if (cancelRequested) {
+                setFinal(if (result.isNotBlank()) result + note else "Stopped.", "stopped after $took")
+            } else if (error.isNotEmpty()) {
+                setFinal("[Error] $error", "")
+            } else {
+                if (sourceDoc != null && result.isNotBlank()) sourceDoc.summary = result
+                setFinal(result.ifBlank { "(no summary)" } + note, "took $took")
+            }
+            generating = false
+        }
+    }
+
+    /** Instant keywords for typed text, or the attached document when the box is empty. */
+    fun keywords(inputText: String) {
+        val typed = inputText.trim()
+        val doc = document
+        if (generating || (typed.isEmpty() && doc == null)) return
+
+        val fromDoc = typed.isEmpty()
+        val source = if (fromDoc) doc?.text ?: "" else typed
+        messages.add(
+            ChatMessage(
+                "user",
+                if (fromDoc) "Keywords for the attached document."
+                else "Keywords for this text:\n" + preview(typed)
+            )
+        )
+        messages.add(ChatMessage("assistant", "Finding keywords..."))
+        generating = true
+
+        viewModelScope.launch(Dispatchers.Default) {
+            val list = try {
+                Keywords.extract(source, 12)
+            } catch (t: Throwable) {
+                emptyList()
+            }
+            val reply = if (list.isEmpty()) "I could not find clear keywords in that text."
+            else list.joinToString("\n") { "- $it" }
+            setFinal(reply, "instant, no model used")
+            generating = false
+        }
+    }
+
+    /** Corrects grammar, spelling and punctuation of the typed text. */
+    fun fixGrammar(inputText: String) {
+        val typed = inputText.trim()
+        if (typed.isEmpty() || generating || status != ModelStatus.READY) return
+
+        messages.add(ChatMessage("user", "Fix the grammar:\n$typed"))
+        messages.add(ChatMessage("assistant", ""))
+        generating = true
+        cancelRequested = false
+
+        viewModelScope.launch(Dispatchers.Default) {
+            val maxTokens = try {
+                (NativeBridge.tokenCount(typed.toByteArray(Charsets.UTF_8)) * 3 / 2 + 32)
+                    .coerceIn(64, 1024)
+            } catch (t: Throwable) {
+                512
+            }
+            val (text, error) = runOnce(GRAMMAR_INSTRUCTION, typed, maxTokens, 0f) { setAssistant(it) }
+            val stats = formatStats(
+                try {
+                    NativeBridge.lastStats()
+                } catch (t: Throwable) {
+                    ""
+                }
+            )
+            var finalText = text
+            if (error.isNotEmpty()) finalText += "\n\n[Error] $error"
+            if (finalText.isBlank()) finalText = "(no reply)"
+            setFinal(finalText, stats)
             generating = false
         }
     }
@@ -395,6 +629,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private const val MAX_NEW_TOKENS = 1024
         private const val RESERVE_TOKENS = 512
         private const val TOP_CHUNKS = 3
+        private const val SECTION_WORDS = 350
+        private const val MAX_SECTIONS = 12
+        private const val REDUCE_ESTIMATE_SECONDS = 90.0
+        private val GENERAL_HINTS = listOf(
+            "about", "summar", "overview", "main point", "main idea", "tl;dr", "tldr",
+            "gist", "what is this", "what's this", "describe", "explain this"
+        )
+        private const val SUMMARY_PART_INSTRUCTION =
+            "Summarize this part of a document in 2 or 3 short sentences. Focus on the key facts."
+        private const val SUMMARY_FINAL_INSTRUCTION =
+            "Below are short summaries of consecutive parts of one document. " +
+                "Write a clear summary of the whole document: first one sentence saying what " +
+                "the document is about, then 3 to 5 bullet points with the key points. " +
+                "Do not mention the parts."
+        private const val SUMMARY_ONE_INSTRUCTION =
+            "Summarize the text below: first one sentence saying what it is about, " +
+                "then 3 to 5 bullet points with the key points."
+        private const val GRAMMAR_INSTRUCTION =
+            "Correct the grammar, spelling and punctuation of the text below. " +
+                "Keep the original meaning and tone. Reply with only the corrected text, nothing else."
         private const val TEMPERATURE = 0.7f
         private const val DEFAULT_MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
         private val DEFAULT_MODEL_URLS = listOf(
